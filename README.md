@@ -1,3 +1,2 @@
-Here are 4-5 sentences for your GitHub README file, suitable for a project like the Excel merge tool:
 
 This project provides a robust solution for merging and updating Excel data, specifically designed for managing Provider Effective Dates based on NPI mappings and 'Approved' statuses. It intelligently combines information from two Excel files, ensuring that the 'Provider Effective Date' is accurately updated only when an 'Approved' VotedDate is available. A key feature includes highlighting cells in the output that have been modified by an 'Approved' status, providing clear visibility of changes. This tool streamlines data synchronization, reducing manual effort and ensuring data integrity in NPI-related records.
