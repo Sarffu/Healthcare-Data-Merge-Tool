@@ -6,198 +6,285 @@ from openpyxl.styles import PatternFill
 import threading
 import os
 
-# Global variables to store file paths
+# Global variables
 file1_path_global = None
 file2_path_global = None
-save_path_global = None # To store the path of the merged file
+save_path_global = None
+merged_df_global = None
 
 def select_file1():
     global file1_path_global
     file1_path_global = filedialog.askopenfilename(
-        title="Select Excel file with NPI & VotedDate",
+        title="Select Schedule File (with NPI & VotedDate)",
         filetypes=[("Excel files", "*.xlsx *.xls")]
     )
     if file1_path_global:
-        file1_label.config(text=f"File 1: {os.path.basename(file1_path_global)}")
-        check_and_enable_merge_button()
+        file1_status.config(text=f"Selected: {os.path.basename(file1_path_global)}", foreground="green")
+    else:
+        file1_status.config(text="No file selected", foreground="red")
+    check_and_enable_merge_button()
 
 def select_file2():
     global file2_path_global
     file2_path_global = filedialog.askopenfilename(
-        title="Select Excel file with Individual NPI & Provider Effective Date",
+        title="Select Roaster File (with Individual NPI & Provider Effective Date)",
         filetypes=[("Excel files", "*.xlsx *.xls")]
     )
     if file2_path_global:
-        file2_label.config(text=f"File 2: {os.path.basename(file2_path_global)}")
-        check_and_enable_merge_button()
+        file2_status.config(text=f"Selected: {os.path.basename(file2_path_global)}", foreground="green")
+    else:
+        file2_status.config(text="No file selected", foreground="red")
+    check_and_enable_merge_button()
 
 def check_and_enable_merge_button():
-    
     if file1_path_global and file2_path_global:
-        merge_button.config(state=tk.NORMAL)
+        merge_button.config(state=tk.NORMAL, background="#4CAF50")
+        status_label.config(text="Ready to merge files", foreground="green")
     else:
-        merge_button.config(state=tk.DISABLED)
+        merge_button.config(state=tk.DISABLED, background="lightgray")
+        status_label.config(text="Please select both files to continue", foreground="orange")
 
 def perform_merge_logic():
-    """
-    Encapsulates the core merging and highlighting logic.
-    This function will be called in a separate thread.
-    """
-    global save_path_global
-    status_label.config(text="Processing merge, please wait...")
-    merge_button.config(state=tk.DISABLED)
-    select_file1_button.config(state=tk.DISABLED)
-    select_file2_button.config(state=tk.DISABLED)
+    global save_path_global, merged_df_global
+
+    window.after(0, lambda: status_label.config(text="Processing merge...", foreground="blue"))
+    window.after(0, lambda: merge_button.config(state=tk.DISABLED))
+    window.after(0, lambda: select_file1_button.config(state=tk.DISABLED))
+    window.after(0, lambda: select_file2_button.config(state=tk.DISABLED))
 
     try:
-        # Step 2: Read and clean column names
         df1 = pd.read_excel(file1_path_global)
         df2 = pd.read_excel(file2_path_global)
 
         df1.columns = df1.columns.str.strip()
         df2.columns = df2.columns.str.strip()
 
-        # Step 3: Backup original Provider Effective Date for comparison
-        if 'Individual NPI' not in df2.columns or 'Provider Effective Date' not in df2.columns:
-            raise ValueError("File 2 must contain 'Individual NPI' and 'Provider Effective Date' columns.")
-        
-        df2_original_dates = df2[['Individual NPI', 'Provider Effective Date']].copy()
-
-        # Step 4: Merge
-        
         if 'NPI' not in df1.columns or 'VotedDate' not in df1.columns:
-            raise ValueError("File 1 must contain 'NPI' and 'VotedDate' columns.")
+            raise ValueError("Schedule file must contain 'NPI' and 'VotedDate' columns.")
+        if 'Individual NPI' not in df2.columns or 'Provider Effective Date' not in df2.columns:
+            raise ValueError("Roaster file must contain 'Individual NPI' and 'Provider Effective Date' columns.")
 
+        df2_original_dates = df2[['Individual NPI', 'Provider Effective Date']].copy()
         merged = pd.merge(df2, df1[['NPI', 'VotedDate']], how='left', left_on='Individual NPI', right_on='NPI')
         merged['Provider Effective Date'] = merged['VotedDate'].combine_first(merged['Provider Effective Date'])
+        merged['Was_Updated'] = False
 
-        # Step 5: Track which rows were updated
-        merged['Was_Updated'] = False # Initialize to False
-        
-        # Create a dictionary for faster lookup of original dates
-        original_dates_dict = df2_original_dates.set_index('Individual NPI')['Provider Effective Date'].to_dict()
+        orig_dates = df2_original_dates.set_index('Individual NPI')['Provider Effective Date'].to_dict()
+        for idx, row in merged.iterrows():
+            orig = orig_dates.get(row['Individual NPI'])
+            if pd.notna(row['VotedDate']) and pd.isna(orig):
+                merged.loc[idx, 'Was_Updated'] = True
 
-        for index, row in merged.iterrows():
-            original_date = original_dates_dict.get(row['Individual NPI'])
-            if pd.notna(row['VotedDate']) and pd.isna(original_date):
-                merged.loc[index, 'Was_Updated'] = True
-
-        # Drop helper columns
         merged.drop(columns=['NPI', 'VotedDate'], inplace=True)
 
-        # Step 6: Save to Excel
         save_path = filedialog.asksaveasfilename(
-            defaultextension=".xlsx", initialfile="Merged_Output.xlsx", filetypes=[("Excel Files", "*.xlsx")]
+            defaultextension=".xlsx",
+            initialfile="Merged_Output.xlsx",
+            filetypes=[("Excel Files", "*.xlsx")]
         )
         if not save_path:
-            window.after(0, lambda: status_label.config(text="Save cancelled."))
-            window.after(0, reset_gui_state)
+            window.after(0, lambda: status_label.config(text="Merge cancelled", foreground="orange"))
+            reset_gui()
             return
 
-        save_path_global = save_path # Store for confirmation message
+        save_path_global = save_path
         merged.to_excel(save_path, index=False)
 
-        # Step 7: Highlight updated cells using openpyxl
         wb = openpyxl.load_workbook(save_path)
         ws = wb.active
 
-        # Find column index for "Provider Effective Date"
-        provider_col_idx = None
+        provider_idx = None
         for idx, cell in enumerate(ws[1], 1):
             if cell.value == "Provider Effective Date":
-                provider_col_idx = idx
+                provider_idx = idx
                 break
 
-        if provider_col_idx is None:
-            raise ValueError("Could not find 'Provider Effective Date' column in the output file for highlighting.")
+        if provider_idx is None:
+            raise ValueError("Could not find 'Provider Effective Date' column in the output.")
 
-        # Apply yellow fill for updated rows
         fill = PatternFill(start_color="FFFF00", end_color="FFFF00", fill_type="solid")
-
-        
-        for df_row_idx, was_updated in enumerate(merged['Was_Updated']):
+        for df_idx, was_updated in enumerate(merged['Was_Updated']):
             if was_updated:
-                # Add 2 to convert DataFrame index to Excel row number (0-indexed DF + 1 for header + 1 for actual data row)
-                excel_row_idx = df_row_idx + 2 
-                ws.cell(row=excel_row_idx, column=provider_col_idx).fill = fill
+                excel_row = df_idx + 2
+                ws.cell(row=excel_row, column=provider_idx).fill = fill
 
-        # Remove helper column from Excel
-        was_updated_col = None
-        for idx, cell in enumerate(ws[1], 1):
-            if cell.value == "Was_Updated":
-                was_updated_col = idx
+        for idx, c in enumerate(ws[1], 1):
+            if c.value == "Was_Updated":
+                ws.delete_cols(idx)
                 break
 
-        if was_updated_col:
-            ws.delete_cols(was_updated_col)
-
-        # Save final Excel file
         wb.save(save_path)
-        window.after(0, lambda: status_label.config(text=f"Merge successful! File saved at:\n{save_path_global}"))
-        window.after(0, lambda: messagebox.showinfo("Merge Complete", f"Merged file with highlighted updates saved at:\n{save_path_global}"))
+        merged_df_global = merged.copy()
+
+        window.after(0, lambda: status_label.config(
+            text=f"Merge completed successfully!\nSaved to: {os.path.basename(save_path_global)}", 
+            foreground="green"))
+        window.after(0, lambda: messagebox.showinfo(
+            "Success", 
+            f"File successfully saved at:\n{save_path_global}"))
+        window.after(0, show_preview)
 
     except Exception as e:
-        window.after(0, lambda: status_label.config(text=f"Error during merge: {e}"))
-        window.after(0, lambda: messagebox.showerror("Merge Error", f"An error occurred during the merge process:\n{e}"))
+        error_msg = str(e)
+        window.after(0, lambda: status_label.config(text=f"Error: {error_msg}", foreground="red"))
+        window.after(0, lambda: messagebox.showerror("Error", error_msg))
     finally:
-        window.after(0, reset_gui_state)
+        window.after(0, reset_gui)
 
 def start_merge_thread():
-    """Starts the merge logic in a separate thread to keep the GUI responsive."""
     threading.Thread(target=perform_merge_logic, daemon=True).start()
 
-def reset_gui_state():
-    """Resets the GUI elements to their initial state."""
-    merge_button.config(state=tk.DISABLED)
+def reset_gui():
+    merge_button.config(state=tk.DISABLED, background="lightgray")
     select_file1_button.config(state=tk.NORMAL)
     select_file2_button.config(state=tk.NORMAL)
-    global file1_path_global, file2_path_global, save_path_global
-    file1_path_global = None
-    file2_path_global = None
-    save_path_global = None
-    file1_label.config(text="File 1: Not selected")
-    file2_label.config(text="File 2: Not selected")
-    status_label.config(text="Select both Excel files and click 'Perform Merge'.")
+    if not (file1_path_global and file2_path_global):
+        status_label.config(text="Please select both files to continue", foreground="orange")
 
+def show_preview():
+    global merged_df_global
 
-# --- GUI Setup ---
+    for w in preview_frame.winfo_children():
+        w.destroy()
+
+    if merged_df_global is None or merged_df_global.empty:
+        return
+
+    cols = list(merged_df_global.columns)
+
+    tree = ttk.Treeview(preview_frame, columns=cols, show="headings")
+    vsb = ttk.Scrollbar(preview_frame, orient="vertical", command=tree.yview)
+    hsb = ttk.Scrollbar(preview_frame, orient="horizontal", command=tree.xview)
+
+    tree.configure(yscrollcommand=vsb.set, xscrollcommand=hsb.set)
+    vsb.pack(side="right", fill="y")
+    hsb.pack(side="bottom", fill="x")
+    tree.pack(expand=True, fill="both")
+
+    tree.tag_configure("highlight", background="#FFF9C4")
+
+    for col in cols:
+        tree.heading(col, text=col)
+        tree.column(col, width=150, anchor="center")
+
+    for row in merged_df_global.itertuples(index=False):
+        values = tuple(row)
+        tag = "highlight" if getattr(row, "Was_Updated", False) else ""
+        tree.insert("", "end", values=values, tags=(tag,))
+
+# ------------- Professional GUI Design -------------
 window = tk.Tk()
-window.title("Excel Data Merger & Highlighter")
-window.geometry("700x400")
-window.resizable(False, False)
+window.title("Excel Data Merger - Schedule & Roaster")
+window.geometry("1200x800")
+window.configure(bg="#f0f0f0")
 
-# --- Styling ---
+# Custom style for buttons
 style = ttk.Style()
-style.configure("TButton", font=("Helvetica", 10), padding=10)
-style.configure("TLabel", font=("Helvetica", 10))
-style.configure("TEntry", font=("Helvetica", 10))
+style.theme_use('clam')
 
-# --- Widgets ---
-frame = ttk.Frame(window, padding="20")
-frame.pack(expand=True, fill='both')
+# Header
+header = tk.Frame(window, bg="#0078D7", height=60)
+header.pack(fill="x")
 
-# File 1 Selection
-select_file1_button = ttk.Button(frame, text="Select NPI & VotedDate File (File 1)", command=select_file1)
-select_file1_button.pack(pady=5)
-file1_label = ttk.Label(frame, text="File 1: Not selected")
-file1_label.pack(pady=2)
+title = tk.Label(header, 
+                text="Excel Data Merger - Schedule & Roaster", 
+                font=("Segoe UI", 16, "bold"), 
+                bg="#0078D7", 
+                fg="white")
+title.pack(pady=15)
 
-# File 2 Selection
-select_file2_button = ttk.Button(frame, text="Select Individual NPI & Provider Effective Date File (File 2)", command=select_file2)
-select_file2_button.pack(pady=5)
-file2_label = ttk.Label(frame, text="File 2: Not selected")
-file2_label.pack(pady=2)
+# Main content
+content = tk.Frame(window, bg="#f0f0f0")
+content.pack(expand=True, fill="both", padx=20, pady=10)
 
-# Merge Button
-merge_button = ttk.Button(frame, text="Perform Merge and Highlight", command=start_merge_thread, state=tk.DISABLED)
-merge_button.pack(pady=20)
+# File selection panel
+file_panel = tk.LabelFrame(content, 
+                         text=" File Selection ",
+                         font=("Segoe UI", 11, "bold"),
+                         bg="#f0f0f0",
+                         padx=10,
+                         pady=10)
+file_panel.pack(fill="x", pady=(0, 15))
 
-# Status Label
-status_label = ttk.Label(frame, text="Select both Excel files and click 'Perform Merge'.", wraplength=600)
-status_label.pack(pady=10)
+# File 1 selection
+file1_frame = tk.Frame(file_panel, bg="#f0f0f0")
+file1_frame.pack(fill="x", pady=5)
 
-# Initial state check
-check_and_enable_merge_button()
+select_file1_button = tk.Button(file1_frame, 
+                              text="Select Schedule File",
+                              font=("Segoe UI", 10),
+                              bg="#E1E1E1",
+                              relief="groove",
+                              command=select_file1)
+select_file1_button.pack(side="left", padx=(0, 10))
 
-window.protocol("WM_DELETE_WINDOW", window.destroy)
+file1_status = tk.Label(file1_frame, 
+                       text="No file selected", 
+                       bg="#f0f0f0", 
+                       font=("Segoe UI", 10))
+file1_status.pack(side="left")
+
+# File 2 selection
+file2_frame = tk.Frame(file_panel, bg="#f0f0f0")
+file2_frame.pack(fill="x", pady=5)
+
+select_file2_button = tk.Button(file2_frame, 
+                              text="Select Roaster File",
+                              font=("Segoe UI", 10),
+                              bg="#E1E1E1",
+                              relief="groove",
+                              command=select_file2)
+select_file2_button.pack(side="left", padx=(0, 10))
+
+file2_status = tk.Label(file2_frame, 
+                       text="No file selected", 
+                       bg="#f0f0f0", 
+                       font=("Segoe UI", 10))
+file2_status.pack(side="left")
+
+# Action buttons
+button_frame = tk.Frame(file_panel, bg="#f0f0f0")
+button_frame.pack(fill="x", pady=(15, 5))
+
+merge_button = tk.Button(button_frame, 
+                       text="Merge Files", 
+                       font=("Segoe UI", 10, "bold"),
+                       bg="lightgray",
+                       fg="white",
+                       state=tk.DISABLED,
+                       relief="groove",
+                       command=start_merge_thread)
+merge_button.pack(side="left", padx=(0, 10))
+
+exit_button = tk.Button(button_frame, 
+                      text="Exit", 
+                      font=("Segoe UI", 10),
+                      bg="#E1E1E1",
+                      relief="groove",
+                      command=window.destroy)
+exit_button.pack(side="left")
+
+# Status bar
+status_frame = tk.Frame(content, bg="#f0f0f0")
+status_frame.pack(fill="x", pady=(0, 15))
+
+status_label = tk.Label(status_frame, 
+                      text="Please select both files to continue", 
+                      bg="#f0f0f0", 
+                      font=("Segoe UI", 10),
+                      fg="orange")
+status_label.pack()
+
+# Preview panel
+preview_panel = tk.LabelFrame(content, 
+                            text=" Merged Data Preview ",
+                            font=("Segoe UI", 11, "bold"),
+                            bg="#f0f0f0",
+                            padx=10,
+                            pady=10)
+preview_panel.pack(expand=True, fill="both")
+
+preview_frame = tk.Frame(preview_panel, bg="#f0f0f0")
+preview_frame.pack(expand=True, fill="both", padx=5, pady=5)
+
 window.mainloop()
