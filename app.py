@@ -5,54 +5,225 @@ import openpyxl
 from openpyxl.styles import PatternFill
 import threading
 import os
-from PIL import Image, ImageTk
+from PIL import Image, ImageTk # Pillow library for image handling
+import warnings # Import warnings module
 
 # Global variables
 file1_path_global = None
 file2_path_global = None
 save_path_global = None
-merged_df_global = None # This will store the DataFrame with 'Was_Updated' column
+merged_df_global = None  # This will store the DataFrame with 'Was_Updated' column
+file1_sheet_name_global = None
+file2_sheet_name_global = None
 
 # Global variables for icons
 schedule_icon = None
 roaster_icon = None
 
-# Helper function to read Excel or CSV based on file extension
-def read_file_into_df(file_path):
+# Suppress the specific openpyxl UserWarning for invalid dates.
+# This makes the application less noisy in the console for known data issues.
+# The underlying data problem in the Excel file still exists, but our code
+# handles it gracefully by coercing invalid dates to NaT.
+warnings.filterwarnings("ignore", category=UserWarning, module='openpyxl.worksheet._reader')
+
+
+def get_excel_sheet_names(file_path):
+    """Returns a list of sheet names from an Excel file."""
     try:
+        xls = pd.ExcelFile(file_path)
+        return xls.sheet_names
+    except Exception as e:
+        raise ValueError(f"Error reading sheets from Excel file '{os.path.basename(file_path)}': {e}")
+
+# Helper function to read Excel or CSV based on file extension
+# Enhanced to handle date parsing more robustly after reading
+def read_file_into_df(file_path, sheet_name=None):
+    try:
+        df = None
         if file_path.lower().endswith(('.xlsx', '.xls')):
-            return pd.read_excel(file_path)
+            # Read Excel without parsing dates directly, let Pandas handle it later
+            df = pd.read_excel(file_path, sheet_name=sheet_name, keep_default_na=True)
         elif file_path.lower().endswith('.csv'):
-            return pd.read_csv(file_path)
+            # Detect separator for CSV
+            try:
+                df = pd.read_csv(file_path, keep_default_na=True)
+                # Check if it looks like a single column (meaning wrong delimiter)
+                if len(df.columns) == 1 and ';' in str(df.iloc[0,0]): # Check first cell for semicolon
+                    df = pd.read_csv(file_path, sep=';', keep_default_na=True)
+            except Exception:
+                # Fallback if initial read fails, try common delimiters
+                try:
+                    df = pd.read_csv(file_path, sep=',', keep_default_na=True)
+                except Exception:
+                    df = pd.read_csv(file_path, sep=';', keep_default_na=True) # Try semicolon
         else:
             raise ValueError("Unsupported file format. Please select an Excel (.xlsx, .xls) or CSV (.csv) file.")
+        
+        # Strip whitespace from column names immediately after reading
+        df.columns = df.columns.str.strip()
+
+        # Explicitly convert potential date columns to datetime objects
+        # using errors='coerce' to turn invalid parses into NaT
+        if 'VotedDate' in df.columns:
+            df['VotedDate'] = pd.to_datetime(df['VotedDate'], errors='coerce')
+        if 'Provider Effective Date' in df.columns:
+            df['Provider Effective Date'] = pd.to_datetime(df['Provider Effective Date'], errors='coerce')
+            
+        return df
+
     except Exception as e:
         raise ValueError(f"Error reading file '{os.path.basename(file_path)}': {e}")
 
+def select_file_and_sheet(file_type):
+    global file1_path_global, file2_path_global, file1_sheet_name_global, file2_sheet_name_global
 
-def select_file1():
-    global file1_path_global
-    file1_path_global = filedialog.askopenfilename(
-        title="Import Scheduler File (with NPI & VotedDate)",
-        filetypes=[("Excel files", "*.xlsx *.xls"), ("CSV files", "*.csv"), ("All files", "*.*")],
+    file_path = filedialog.askopenfilename(
+        title=f"Import {file_type} File",
+        filetypes=[("All Supported Files", "*.xlsx *.xls *.csv"),
+                   ("Excel files", "*.xlsx *.xls"),
+                   ("CSV files", "*.csv"),
+                   ("All files", "*.*")],
     )
-    if file1_path_global:
-        file1_status.config(text=f"Selected: {os.path.basename(file1_path_global)}", foreground="green")
-    else:
-        file1_status.config(text="No file selected", foreground="red")
+
+    if not file_path:
+        if file_type == "Scheduler":
+            file1_status.config(text="No file selected", foreground="red")
+            file1_path_global = None
+            file1_sheet_name_global = None
+        elif file_type == "Roaster":
+            file2_status.config(text="No file selected", foreground="red")
+            file2_path_global = None
+            file2_sheet_name_global = None
+        check_and_enable_merge_button()
+        return
+
+    if file_path.lower().endswith(('.xlsx', '.xls')):
+        try:
+            sheet_names = get_excel_sheet_names(file_path)
+            if not sheet_names:
+                messagebox.showerror("Error", "No sheets found in the Excel file.")
+                if file_type == "Scheduler":
+                    file1_path_global = None
+                    file1_sheet_name_global = None
+                    file1_status.config(text="No sheets found", foreground="red")
+                elif file_type == "Roaster":
+                    file2_path_global = None
+                    file2_sheet_name_global = None
+                    file2_status.config(text="No sheets found", foreground="red")
+                check_and_enable_merge_button()
+                return
+
+            if len(sheet_names) > 1:
+                selected_sheet = ask_sheet_selection(sheet_names, file_path)
+                if not selected_sheet:
+                    # User cancelled sheet selection
+                    if file_type == "Scheduler":
+                        file1_status.config(text="Sheet selection cancelled", foreground="red")
+                        file1_path_global = None
+                        file1_sheet_name_global = None
+                    elif file_type == "Roaster":
+                        file2_status.config(text="Sheet selection cancelled", foreground="red")
+                        file2_path_global = None
+                        file2_sheet_name_global = None
+                    check_and_enable_merge_button()
+                    return
+            else:
+                selected_sheet = sheet_names[0]
+            
+            # Try to read the file with the selected sheet to catch immediate parsing errors
+            # This is important to ensure the file is actually readable before setting global paths
+            try:
+                read_file_into_df(file_path, selected_sheet)
+            except ValueError as ve:
+                messagebox.showerror("File Read Error", f"Could not read selected Excel file or sheet: {ve}")
+                if file_type == "Scheduler":
+                    file1_path_global = None
+                    file1_sheet_name_global = None
+                    file1_status.config(text="Error reading sheet", foreground="red")
+                elif file_type == "Roaster":
+                    file2_path_global = None
+                    file2_sheet_name_global = None
+                    file2_status.config(text="Error reading sheet", foreground="red")
+                check_and_enable_merge_button()
+                return
+
+            if file_type == "Scheduler":
+                file1_path_global = file_path
+                file1_sheet_name_global = selected_sheet
+                file1_status.config(text=f"Selected: {os.path.basename(file1_path_global)} (Sheet: {file1_sheet_name_global})", foreground="green")
+            elif file_type == "Roaster":
+                file2_path_global = file_path
+                file2_sheet_name_global = selected_sheet
+                file2_status.config(text=f"Selected: {os.path.basename(file2_path_global)} (Sheet: {file2_sheet_name_global})", foreground="green")
+        except ValueError as e:
+            messagebox.showerror("File Error", str(e))
+            if file_type == "Scheduler":
+                file1_status.config(text="Error reading file", foreground="red")
+                file1_path_global = None
+                file1_sheet_name_global = None
+            elif file_type == "Roaster":
+                file2_path_global = None
+                file2_sheet_name_global = None
+    else: # CSV file - No sheet selection needed, but handle potential errors
+        try:
+            # Just try to read it to confirm it's valid
+            read_file_into_df(file_path) 
+            if file_type == "Scheduler":
+                file1_path_global = file_path
+                file1_sheet_name_global = None # No sheet for CSV
+                file1_status.config(text=f"Selected: {os.path.basename(file1_path_global)}", foreground="green")
+            elif file_type == "Roaster":
+                file2_path_global = file_path
+                file2_sheet_name_global = None # No sheet for CSV
+                file2_status.config(text=f"Selected: {os.path.basename(file2_path_global)}", foreground="green")
+        except Exception as e:
+            messagebox.showerror("File Error", f"Error reading CSV file '{os.path.basename(file_path)}': {e}")
+            if file_type == "Scheduler":
+                file1_status.config(text="Error reading CSV", foreground="red")
+                file1_path_global = None
+                file1_sheet_name_global = None
+            elif file_type == "Roaster":
+                file2_path_global = None
+                file2_sheet_name_global = None
+
     check_and_enable_merge_button()
 
-def select_file2():
-    global file2_path_global
-    file2_path_global = filedialog.askopenfilename(
-        title="Import Roaster File (with Individual NPI & Provider Effective Date)",
-        filetypes=[("Excel files", "*.xlsx *.xls"), ("CSV files", "*.csv"), ("All files", "*.*")],
-    )
-    if file2_path_global:
-        file2_status.config(text=f"Selected: {os.path.basename(file2_path_global)}", foreground="green")
-    else:
-        file2_status.config(text="No file selected", foreground="red")
-    check_and_enable_merge_button()
+def ask_sheet_selection(sheet_names, file_path):
+    """Opens a new window for sheet selection."""
+    dialog = tk.Toplevel(window)
+    dialog.title("Select Sheet")
+    dialog.geometry("300x150")
+    dialog.transient(window)
+    dialog.grab_set()
+
+    tk.Label(dialog, text=f"Select a sheet from '{os.path.basename(file_path)}':", font=("Segoe UI", 10, "bold")).pack(pady=10)
+
+    sheet_var = tk.StringVar(dialog)
+    sheet_var.set(sheet_names[0]) # default value
+
+    sheet_menu = ttk.Combobox(dialog, textvariable=sheet_var, values=sheet_names, state="readonly")
+    sheet_menu.pack(pady=5)
+
+    selected_sheet = None
+
+    def on_ok():
+        nonlocal selected_sheet
+        selected_sheet = sheet_var.get()
+        dialog.destroy()
+
+    def on_cancel():
+        nonlocal selected_sheet
+        selected_sheet = None
+        dialog.destroy()
+
+    ok_button = ttk.Button(dialog, text="OK", command=on_ok)
+    ok_button.pack(side="left", padx=(50, 10), pady=10)
+
+    cancel_button = ttk.Button(dialog, text="Cancel", command=on_cancel)
+    cancel_button.pack(side="right", padx=(10, 50), pady=10)
+
+    window.wait_window(dialog) # Wait until the dialog is closed
+    return selected_sheet
 
 def check_and_enable_merge_button():
     if file1_path_global and file2_path_global:
@@ -79,30 +250,44 @@ def perform_merge_logic():
     window.after(0, lambda: exit_button.config(state=tk.DISABLED)) # Disable exit during merge
 
     try:
-        df1 = read_file_into_df(file1_path_global)
-        df2 = read_file_into_df(file2_path_global)
+        # Read files using the enhanced read_file_into_df
+        df1 = read_file_into_df(file1_path_global, file1_sheet_name_global)
+        df2 = read_file_into_df(file2_path_global, file2_sheet_name_global)
 
-        df1.columns = df1.columns.str.strip()
-        df2.columns = df2.columns.str.strip()
+        # Column stripping is now done inside read_file_into_df
 
         if 'NPI' not in df1.columns or 'VotedDate' not in df1.columns:
             raise ValueError("Scheduler file must contain 'NPI' and 'VotedDate' columns.")
         if 'Individual NPI' not in df2.columns or 'Provider Effective Date' not in df2.columns:
             raise ValueError("Roaster file must contain 'Individual NPI' and 'Provider Effective Date' columns.")
 
+        # Date conversion is now done inside read_file_into_df, so no need here
+
         df2_original_dates = df2[['Individual NPI', 'Provider Effective Date']].copy()
+        
+        # Merge operation
         merged = pd.merge(df2, df1[['NPI', 'VotedDate']], how='left', left_on='Individual NPI', right_on='NPI')
-        merged['Provider Effective Date'] = merged['VotedDate'].combine_first(merged['Provider Effective Date'])
+        
+        # Track if Provider Effective Date was originally NaT or None before update
+        merged['Was_Originally_Empty'] = merged['Provider Effective Date'].isna()
+
+        # Update 'Provider Effective Date' only if 'VotedDate' is not null
+        merged['Provider Effective Date'] = merged['VotedDate'].fillna(merged['Provider Effective Date'])
+        
+        # Determine if 'Provider Effective Date' was updated
         merged['Was_Updated'] = False
-
-        orig_dates = df2_original_dates.set_index('Individual NPI')['Provider Effective Date'].to_dict()
         for idx, row in merged.iterrows():
-            orig = orig_dates.get(row['Individual NPI'])
-            # Check if VotedDate exists and original Provider Effective Date was missing/NaT
-            if pd.notna(row['VotedDate']) and (pd.isna(orig) or pd.isnull(orig)):
-                merged.loc[idx, 'Was_Updated'] = True
+            orig_date_series = df2_original_dates[df2_original_dates['Individual NPI'] == row['Individual NPI']]['Provider Effective Date']
+            orig_date = orig_date_series.iloc[0] if not orig_date_series.empty else pd.NaT
 
-        # Store the merged DataFrame with the 'Was_Updated' column for both preview and export logic
+            if pd.notna(row['VotedDate']): # If there is a VotedDate
+                if pd.isna(orig_date): # If original Provider Effective Date was missing/NaT
+                    merged.loc[idx, 'Was_Updated'] = True
+                else:
+                    # Compare only the date part, ignore time, for floating point precision issues
+                    if row['VotedDate'].normalize() != orig_date.normalize(): 
+                        merged.loc[idx, 'Was_Updated'] = True
+
         merged_df_global = merged.copy() 
 
         # Ask for save path for the Excel output
@@ -121,7 +306,7 @@ def perform_merge_logic():
         # Prepare DataFrame for direct Excel export (without Was_Updated, NPI, VotedDate columns)
         df_for_excel_output = merged_df_global.copy()
         if 'Was_Updated' in df_for_excel_output.columns:
-            df_for_excel_output.drop(columns=['Was_Updated', 'NPI', 'VotedDate'], inplace=True, errors='ignore')
+            df_for_excel_output.drop(columns=['Was_Updated', 'NPI', 'VotedDate', 'Was_Originally_Empty'], inplace=True, errors='ignore')
 
         df_for_excel_output.to_excel(save_path, index=False)
 
@@ -139,12 +324,13 @@ def perform_merge_logic():
             raise ValueError("Could not find 'Provider Effective Date' column in the output for coloring.")
 
         fill = PatternFill(start_color="FFFF00", end_color="FFFF00", fill_type="solid")
+        
         # Apply coloring based on the original merged_df_global which still has 'Was_Updated'
         for df_idx, was_updated in enumerate(merged_df_global['Was_Updated']):
             if was_updated:
                 excel_row = df_idx + 2 # +1 for 0-indexed to 1-indexed, +1 for header row
                 ws.cell(row=excel_row, column=provider_idx).fill = fill
-        
+            
         wb.save(save_path)
 
         window.after(0, lambda: status_label.config(
@@ -195,10 +381,10 @@ def show_preview():
     if merged_df_global is None or merged_df_global.empty:
         return
 
-    # Create a copy to display in preview, dropping 'Was_Updated', 'NPI', 'VotedDate'
+    # Create a copy to display in preview, dropping 'Was_Updated', 'NPI', 'VotedDate', 'Was_Originally_Empty'
     df_for_preview = merged_df_global.copy()
     if 'Was_Updated' in df_for_preview.columns:
-        df_for_preview.drop(columns=['Was_Updated', 'NPI', 'VotedDate'], inplace=True, errors='ignore')
+        df_for_preview.drop(columns=['Was_Updated', 'NPI', 'VotedDate', 'Was_Originally_Empty'], inplace=True, errors='ignore')
 
     cols = list(df_for_preview.columns)
 
@@ -243,9 +429,9 @@ def export_data(file_format):
         messagebox.showwarning("Export Warning", "No merged data available to export.")
         return
 
-    # Prepare DataFrame for export: always remove internal 'NPI', 'VotedDate' columns for final output
+    # Prepare DataFrame for export: always remove internal 'NPI', 'VotedDate', 'Was_Originally_Empty' columns for final output
     df_to_export_clean = merged_df_global.copy()
-    df_to_export_clean.drop(columns=['NPI', 'VotedDate'], inplace=True, errors='ignore')
+    df_to_export_clean.drop(columns=['NPI', 'VotedDate', 'Was_Originally_Empty'], inplace=True, errors='ignore')
 
     if file_format == "Excel":
         # This "Export to Excel" here will just save a clean version without the Was_Updated column.
@@ -270,11 +456,11 @@ def export_data(file_format):
         if 'Was_Updated' in df_for_csv_export.columns:
             # Map True/False to 'Yes'/'No' for better readability in CSV
             df_for_csv_export['Provider Effective Date Updated'] = df_for_csv_export['Was_Updated'].map({True: 'Yes', False: 'No'})
-            # Drop the internal 'Was_Updated', 'NPI', 'VotedDate' columns
-            df_for_csv_export.drop(columns=['Was_Updated', 'NPI', 'VotedDate'], inplace=True, errors='ignore')
+            # Drop the internal 'Was_Updated', 'NPI', 'VotedDate', 'Was_Originally_Empty' columns
+            df_for_csv_export.drop(columns=['Was_Updated', 'NPI', 'VotedDate', 'Was_Originally_Empty'], inplace=True, errors='ignore')
         else:
             # If 'Was_Updated' column is somehow missing, just drop NPI and VotedDate
-            df_for_csv_export.drop(columns=['NPI', 'VotedDate'], inplace=True, errors='ignore')
+            df_for_csv_export.drop(columns=['NPI', 'VotedDate', 'Was_Originally_Empty'], inplace=True, errors='ignore')
 
 
         file_path = filedialog.asksaveasfilename(
@@ -292,14 +478,26 @@ def export_data(file_format):
 # ------------- Professional GUI Design -------------
 window = tk.Tk()
 window.title("Excel Data Merger - Schedule & Roaster")
-window.geometry("1200x800")
+window.state('zoomed') # Opens the window in maximized state by default
 window.configure(bg="#f0f0f0")
 
-# Load icons
+# Load application icon (for taskbar/title bar)
+script_dir = os.path.dirname(__file__)
+app_icon_png_path = os.path.join(script_dir, 'Icons', 'app_icon.png') # Path to the PNG icon
+
+if os.path.exists(app_icon_png_path):
+    try:
+        # Load the PNG image using PIL/Pillow
+        icon_image_raw = Image.open(app_icon_png_path)
+        icon_image = ImageTk.PhotoImage(icon_image_raw)
+        window.iconphoto(True, icon_image) # Set the icon for the window
+    except Exception as e:
+        messagebox.showwarning("Icon Error", f"Could not set application icon from PNG: {e}. Ensure '{os.path.basename(app_icon_png_path)}' is a valid PNG file.")
+else:
+    messagebox.showwarning("Icon Warning", f"Application icon file '{os.path.basename(app_icon_png_path)}' not found. Taskbar icon may not appear.")
+
+# Load internal button icons
 try:
-    # Use os.path.dirname(__file__) to get the script's directory
-    # Then use os.path.join to create the correct path to the 'Icons' subfolder
-    script_dir = os.path.dirname(__file__)
     schedule_icon_path = os.path.join(script_dir, 'Icons', 'scheduler_icon.png') 
     roaster_icon_path = os.path.join(script_dir, 'Icons', 'roaster_icon.png')
     
@@ -310,11 +508,11 @@ try:
     roaster_icon = ImageTk.PhotoImage(roaster_icon_raw)
 
 except FileNotFoundError:
-    messagebox.showwarning("Icon Warning", "Could not load icon files. Please ensure 'scheduler_icon.png' and 'roaster_icon.png' are in the 'Icons' subfolder next to the script.")
+    messagebox.showwarning("Icon Warning", "Could not load button icon files. Please ensure 'scheduler_icon.png' and 'roaster_icon.png' are in the 'Icons' subfolder next to the script.")
     schedule_icon = None
     roaster_icon = None
 except Exception as e:
-    messagebox.showwarning("Icon Error", f"Error loading icons: {e}. Buttons will be text-only.")
+    messagebox.showwarning("Icon Error", f"Error loading button icons: {e}. Buttons will be text-only.")
     schedule_icon = None
     roaster_icon = None
 
@@ -341,7 +539,7 @@ header = tk.Frame(window, bg="#0078D7", height=60)
 header.pack(fill="x")
 
 title = tk.Label(header, 
-                 text="Excel Data Merger - Scheduler & Roaster", 
+                 text="Excel Data Merger - Schedule & Roaster", 
                  font=("Segoe UI", 16, "bold"), 
                  bg="#0078D7", 
                  fg="white")
@@ -370,7 +568,7 @@ file1_frame.pack(fill="x", pady=5)
 
 select_file1_button = ttk.Button(file1_frame, 
                                  text="Import Scheduler File",
-                                 command=select_file1,
+                                 command=lambda: select_file_and_sheet("Scheduler"),
                                  compound="left", # Place icon to the left of text
                                  image=schedule_icon,
                                  width=20) # Increased width
@@ -388,7 +586,7 @@ file2_frame.pack(fill="x", pady=5)
 
 select_file2_button = ttk.Button(file2_frame, 
                                  text="Import Roaster File",
-                                 command=select_file2,
+                                 command=lambda: select_file_and_sheet("Roaster"),
                                  compound="left", # Place icon to the left of text
                                  image=roaster_icon,
                                  width=20) # Increased width
