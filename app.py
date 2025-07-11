@@ -12,7 +12,7 @@ import warnings # Import warnings module
 file1_path_global = None
 file2_path_global = None
 save_path_global = None
-merged_df_global = None  # This will store the DataFrame with 'Was_Updated' column
+merged_df_global = None # This will store the DataFrame with 'Was_Updated' column
 file1_sheet_name_global = None
 file2_sheet_name_global = None
 
@@ -65,9 +65,9 @@ def read_file_into_df(file_path, sheet_name=None):
         # Explicitly convert potential date columns to datetime objects
         # using errors='coerce' to turn invalid parses into NaT
         if 'VotedDate' in df.columns:
-            df['VotedDate'] = pd.to_datetime(df['VotedDate'], errors='coerce')
+            df['VotedDate'] = pd.to_datetime(df['VotedDate'], errors='coerce').dt.date # Added .dt.date
         if 'Provider Effective Date' in df.columns:
-            df['Provider Effective Date'] = pd.to_datetime(df['Provider Effective Date'], errors='coerce')
+            df['Provider Effective Date'] = pd.to_datetime(df['Provider Effective Date'], errors='coerce').dt.date # Added .dt.date
             
         return df
 
@@ -285,7 +285,8 @@ def perform_merge_logic():
                     merged.loc[idx, 'Was_Updated'] = True
                 else:
                     # Compare only the date part, ignore time, for floating point precision issues
-                    if row['VotedDate'].normalize() != orig_date.normalize(): 
+                    # Now that dates are already .dt.date, direct comparison works as intended
+                    if row['VotedDate'] != orig_date: 
                         merged.loc[idx, 'Was_Updated'] = True
 
         merged_df_global = merged.copy() 
@@ -575,9 +576,9 @@ select_file1_button = ttk.Button(file1_frame,
 select_file1_button.pack(side="left", padx=(0, 10))
 
 file1_status = tk.Label(file1_frame, 
-                        text="No file selected", 
-                        bg="#f0f0f0", 
-                        font=("Segoe UI", 10))
+                         text="No file selected", 
+                         bg="#f0f0f0", 
+                         font=("Segoe UI", 10))
 file1_status.pack(side="left")
 
 # File 2 selection
@@ -593,9 +594,9 @@ select_file2_button = ttk.Button(file2_frame,
 select_file2_button.pack(side="left", padx=(0, 10))
 
 file2_status = tk.Label(file2_frame, 
-                        text="No file selected", 
-                        bg="#f0f0f0", 
-                        font=("Segoe UI", 10))
+                         text="No file selected", 
+                         bg="#f0f0f0", 
+                         font=("Segoe UI", 10))
 file2_status.pack(side="left")
 
 # Action buttons - Moved to the right top corner of the file_panel
@@ -631,10 +632,10 @@ status_frame = tk.Frame(content, bg="#f0f0f0")
 status_frame.pack(fill="x", pady=(0, 15))
 
 status_label = tk.Label(status_frame, 
-                        text="Please select both files to continue", 
-                        bg="#f0f0f0", 
-                        font=("Segoe UI", 10),
-                        fg="orange")
+                         text="Please select both files to continue", 
+                         bg="#f0f0f0", 
+                         font=("Segoe UI", 10),
+                         fg="orange")
 status_label.pack()
 
 # Preview panel
